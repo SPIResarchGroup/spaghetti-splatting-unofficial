@@ -26,6 +26,16 @@ def expon_lr(it, lr0, lr1, max_steps):
     return math.exp(math.log(lr0) * (1 - t) + math.log(lr1) * t)
 
 
+def sv_cosine_lr(it, lr0, iters, warmup=1000, freeze=3000):
+    """Spherical Voronoi release schedule for sites / temperatures: 0 during the first `warmup` steps and the last
+    `freeze` steps, cosine decay lr0 -> 0.1 lr0 in between."""
+    end = iters - freeze
+    if it < warmup or it >= end:
+        return 0.0
+    t = (it - warmup) / max(1, end - warmup)
+    return 0.1 * lr0 + 0.45 * lr0 * (1 + math.cos(math.pi * t))
+
+
 def get_args(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
@@ -42,6 +52,9 @@ def get_args(argv=None):
     ap.add_argument("--no_attract", action="store_true")
     ap.add_argument("--no_mip", action="store_true")
     ap.add_argument("--sh_degree", type=int, default=3)
+    ap.add_argument("--appearance", choices=["sv", "sh"], default="sv",
+                    help="sv = Spherical Voronoi with --sv_sites sites (the paper's SV8, default); sh = SH degree 3")
+    ap.add_argument("--sv_sites", type=int, default=8)
     ap.add_argument("--bg", default=None, help="r,g,b in [0,1]; default black (colmap) / meta (synthetic)")
     ap.add_argument("--lambda_dssim", type=float, default=0.2)
     ap.add_argument("--opacity_reg", type=float, default=0.01)
@@ -105,7 +118,7 @@ def main(argv=None):
     if args.type == "colmap":
         train_cams, test_cams, xyz, rgb = load_colmap(args.data, args.images, device=dev, bg=bg_arg)
         bg = [0.0, 0.0, 0.0]
-    elif args.type == "blender":  # NeRF-synthetic format, e.g. Shelly: RGBA composited on white
+    elif args.type == "blender":
         train_cams, test_cams, xyz, rgb = load_blender(args.data, device=dev, bg=bg_arg or (1.0, 1.0, 1.0))
         bg = [1.0, 1.0, 1.0]
     else:
@@ -118,19 +131,26 @@ def main(argv=None):
     print(f"{len(train_cams)} train / {len(test_cams)} test views, {xyz.shape[0]} init points, extent {extent:.3f}")
 
     mip = not args.no_mip
-    model = SpaghettiModel(sh_degree=args.sh_degree, kernel=args.kernel, device=dev)
+    model = SpaghettiModel(sh_degree=args.sh_degree, kernel=args.kernel, device=dev, appearance=args.appearance,
+                           sv_sites=args.sv_sites)
     model.split_len_factor = args.split_len_factor
     model.init_from_points(xyz, rgb, seg_len_factor=args.init_seg_len, point_mode=args.points)
     if mip:
         model.compute_filter3d(train_cams)
     lr = {"verts": 1.6e-4 * extent, "log_scales": 5e-3, "quats": 1e-3, "opacity": 5e-2, "sh_dc": 2.5e-3,
-          "sh_rest": 2.5e-3 / 20, "beta": 5e-3}
+          "sh_rest": 2.5e-3 / 20, "beta": 5e-3,
+          # Spherical Voronoi release (3DGS-MCMC variant): colours constant, sites / tau on sv_cosine_lr
+          "sv_colors": 8e-4, "sv_sites": 2e-3, "sv_tau": 6e-3}
     opt = model.make_optimizer(lr)
     relocate_stop = (args.relocate_stop if args.relocate_stop is not None
                      else max(args.densify_from, args.iters - min(5000, args.iters // 6)))
     topo = not args.points
+    merge_from = relocate_stop + 1  # merging and attraction run after relocation stops (Sec. 4.1)
     spawn_kw = dict(allow_split=not args.no_split, allow_clone=not args.no_clone)
 
+    # 3DGS-MCMC noise is Sigma * eps * noise_lr * lr: ~ extent^3 in scene units, i.e. not unit-invariant. Rescale to
+    # the extent it was tuned for (~4-6, Mip-NeRF 360); 1 for scenes up to extent 6 (bonsai, Fuzzy, synthetic).
+    noise_scale = min(1.0, (6.0 / extent) ** 2)
     log = []
     order = []
     t_start = time.time()
@@ -142,6 +162,8 @@ def main(argv=None):
         for g in opt.param_groups:
             if g["name"] == "verts":
                 g["lr"] = lr_xyz
+            elif g["name"] in ("sv_sites", "sv_tau"):
+                g["lr"] = sv_cosine_lr(it, lr[g["name"]], args.iters)
         if it % 1000 == 0:
             model.active_sh = min(model.active_sh + 1, model.sh_degree)
         if not order:
@@ -169,7 +191,7 @@ def main(argv=None):
             model.log_scales.grad[c] += args.scale_reg * torch.exp(model.log_scales)[c] / (3 * N)
         opt.step()
         opt.zero_grad(set_to_none=True)
-        model.add_noise(lr_xyz, args.noise_lr)
+        model.add_noise(lr_xyz, args.noise_lr * noise_scale)
 
         with torch.no_grad():
             ema = float(l1) if ema is None else 0.95 * ema + 0.05 * float(l1)
@@ -178,7 +200,7 @@ def main(argv=None):
                 model.grow(opt, args.cap, **spawn_kw)
                 if mip:
                     model.compute_filter3d(train_cams)
-            if topo and it > relocate_stop and it % args.merge_every == 0:
+            if topo and it >= merge_from and it % args.merge_every == 0:
                 if not args.no_merge:
                     model.merge_endpoints(opt, args.merge_factor)
                 if not args.no_attract:
@@ -191,13 +213,17 @@ def main(argv=None):
                 a, b = model.endpoints()
                 ratio = (b - a).norm(dim=-1) / torch.exp(model.log_scales).max(-1).values
                 lq = torch.quantile(ratio[:: max(1, ratio.numel() // 100000)], torch.tensor([0.5, 0.99], device=dev))
+                alive = float((model.get_opacity() > 0.005).float().mean())
+                cc = torch.stack([c.center for c in train_cams]).mean(0)
+                rmed = float((0.5 * (a + b) - cc).norm(dim=-1).median()) / extent
             rec = dict(it=it, l1=ema, psnr_train=psnr(rgb.detach(), gt), n_seg=model.num_segments,
                        n_vert=model.num_vertices, comp_mean=float(sizes.mean()), comp_max=int(sizes.max()),
-                       pairs=info["n_pairs"], len_ratio_med=float(lq[0]), len_ratio_p99=float(lq[1]), time=el)
+                       pairs=info["n_pairs"], len_ratio_med=float(lq[0]), len_ratio_p99=float(lq[1]), time=el,
+                       alive=alive, r_med_over_extent=rmed)
             log.append(rec)
             print(f"[{it:6d}] l1 {ema:.4f} psnr {rec['psnr_train']:.2f} segs {rec['n_seg']} verts {rec['n_vert']} "
                   f"comp {rec['comp_mean']:.2f}/{rec['comp_max']} L/s {lq[0]:.2f}/{lq[1]:.1f} "
-                  f"pairs {rec['pairs']} {el / 60:.1f}min", flush=True)
+                  f"pairs {rec['pairs']} alive {alive:.2f} r/ext {rmed:.2f} {el / 60:.1f}min", flush=True)
 
     train_min = (time.time() - t_start) / 60
     torch.save(model.state_dict(), os.path.join(args.out, "model.pt"))

@@ -18,7 +18,6 @@ from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spaghetti.data import load_colmap, load_synthetic  # noqa: E402
 from spaghetti.model import SpaghettiModel, inverse_sigmoid  # noqa: E402
-from spaghetti.render import eval_sh  # noqa: E402
 
 
 @torch.no_grad()
@@ -33,7 +32,7 @@ def sketch(m, cam, ss=2, width_px=0.35, alpha_gain=1.5, alpha_max=0.85, darken=0
     v.filter3d = None
     a, b = v.endpoints()
     dirs = F.normalize(0.5 * (a + b) - cam.center[None], dim=-1)
-    col = torch.clamp(eval_sh(m.active_sh, torch.cat([m.sh_dc, m.sh_rest], 1), dirs) + 0.5, 0, 1) * darken
+    col = m.view_colors(dirs).clamp(0, 1) * darken
     z = (0.5 * (a + b)) @ c2.R[2] + c2.t[2]
     v.log_scales = torch.log(z.clamp_min(1e-3) * width_px * ss / c2.fx)[:, None].expand(-1, 3).contiguous()
     o = torch.sigmoid(m.opacity)

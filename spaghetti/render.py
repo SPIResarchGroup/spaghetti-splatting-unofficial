@@ -132,7 +132,7 @@ def project_segments(a_w, b_w, Sigma, cam, near=0.2, eps2d=0.1, mip2d=True):
     return dict(pa=pa, pb=pb, ca=ca, cb=cb, Q=Q, comp2d=comp2d, depth=zm, valid=valid, sigma_max=sig)
 
 
-def screen_radii(proj, rho, kernel, valid_extra=None, beta=None):
+def screen_radii(proj, rho, kernel, valid_extra=None, beta=None, max_radius=None):
     """Pixel radii at both endpoints: the Mahalanobis radius beyond which tau < 1/255 for a point
     (the segment's tau is bounded by the point value of its nearest kernel), i.e. alpha < alpha_min."""
     with torch.no_grad():
@@ -147,6 +147,10 @@ def screen_radii(proj, rho, kernel, valid_extra=None, beta=None):
         if valid_extra is not None:
             ok = ok & valid_extra
         rad = torch.stack([ra, rb], -1)
+        if max_radius is not None:
+            # kernels larger than ~2 screens are degenerate (e.g. a point just past the near plane with a long focal
+            # length); they cover the whole image and can blow up the optimisation -- skip them
+            ok = ok & (rad.max(-1).values <= max_radius)
         rad = torch.where(ok[:, None], rad, torch.zeros_like(rad))
         rad = torch.nan_to_num(rad, nan=0.0, posinf=0.0, neginf=0.0)
     return rad.contiguous()

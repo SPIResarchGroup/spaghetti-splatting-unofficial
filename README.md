@@ -25,8 +25,8 @@ primitives, every segment drawn as a thin line in its own colour.</sub>
 
 ## 📢 News
 
-- **2026-11-21** · Initial release: Gaussian and Beta kernels, CUDA rasterizer, full training recipe, results on
-  Shelly, Mip-NeRF 360 (bonsai) and a synthetic strand scene.
+- **2026-11-21** · Initial release: Gaussian and Beta kernels, SV8 appearance, CUDA rasterizer, full training recipe,
+  results on Shelly, Mip-NeRF 360 (bonsai) and a synthetic strand scene.
 
 ## ✨ Highlights
 
@@ -37,8 +37,9 @@ primitives, every segment drawn as a thin line in its own colour.</sub>
   (forward ≤ 8e-7, backward ≤ 2e-5 relative error).
 - **Strict superset of 3DGS.** A zero-length segment (a = b) reproduces gsplat's 3DGS projection numerically, which
   also gives a point baseline in the same code base.
-- **Paper's training recipe.** 3DGS-MCMC relocation with midpoint split and cloning, polyline merging, attraction loss,
-  Mip-Splatting filters, and the Table 1 ablation.
+- **Paper's training recipe.** Spherical Voronoi appearance with 8 sites (SV8, the paper's default), 3DGS-MCMC
+  relocation with midpoint split and cloning, polyline merging, attraction loss, Mip-Splatting filters, and the
+  Table 1 ablation.
 
 ## 📋 Status
 
@@ -46,8 +47,9 @@ primitives, every segment drawn as a thin line in its own colour.</sub>
 - [x] Screen-space EWA at the segment midpoint with inverse-depth scaling (Sec. 3.4)
 - [x] Mip-Splatting 3D and 2D filters (Sec. 3.5)
 - [x] MCMC relocation with midpoint split / cloning, polyline merging, attraction loss (Sec. 3.6, Eq. 20)
+- [x] Spherical Voronoi appearance with 8 sites (SV8), the paper's default; SH degree 3 as an option
 - [x] Shelly, Mip-NeRF 360 (bonsai), synthetic strands, Table 1 ablation
-- [ ] Spherical Voronoi (SV8) appearance (SH degree 3 is used instead)
+- [ ] Shelly with SV8 (the Shelly numbers below use SH degree 3)
 - [ ] Remaining Mip-NeRF 360 scenes, Fuzzy, GeomHair
 - [ ] Physics simulation of the strands
 
@@ -86,15 +88,16 @@ that also appear in the training set; as in the paper, these training views are 
 ## 🚀 Training
 
 Every run writes `metrics.json` (PSNR / SSIM / LPIPS on the test views), test renders and `model.pt` to `runs/<name>/`.
+The appearance model is SV8 by default (as in the paper); `--appearance sh` switches to SH degree 3.
 
 ```bash
-# Shelly (white background, 30k iterations, cap 500k primitives)
-python train.py --data data/shelly/kitten --type blender --cap 500000 --out runs/shelly_kitten
+# Mip-NeRF 360 (every 8th view held out; the paper caps indoor scenes at 1.5M primitives)
+python train.py --data data/360_v2/bonsai --images images_2 --cap 1500000 --out runs/bonsai   # --kernel beta for Beta
+python train.py --data data/360_v2/bonsai --images images_2 --cap 1500000 --out runs/bonsai_long \
+    --split_len_factor 10 --scale_reg 0.3 --init_seg_len 1.5          # long-segment setting
 
-# Mip-NeRF 360 (every 8th view held out)
-python train.py --data data/360_v2/bonsai --images images_2 --out runs/bonsai --kernel gaussian   # or --kernel beta
-python train.py --data data/360_v2/bonsai --images images_2 --out runs/bonsai_long \
-    --split_len_factor 10 --scale_reg 0.3 --init_seg_len 1.5          # long-segment setting (sketches below)
+# Shelly (white background, 30k iterations, cap 500k primitives; the table below uses --appearance sh)
+python train.py --data data/shelly/kitten --type blender --cap 500000 --out runs/shelly_kitten --appearance sh
 
 # synthetic strands
 python train.py --data data/synth_spaghetti --type synthetic --cap 100000 --out runs/synth
@@ -108,7 +111,7 @@ python train.py ... --no_split | --no_clone | --no_merge | --no_attract   # Tabl
 
 ```bash
 # Dirac-measure sketch (paper Fig. 3 style): every primitive as a 0.15 px line with the same alpha
-python scripts/vis_sketch.py --run runs/bonsai_long --data data/360_v2/bonsai --view 3 --out figures/sketch \
+python scripts/vis_sketch.py --run runs/bonsai --data data/360_v2/bonsai --view 3 --out figures/sketch \
     --alpha_mode const --const_alpha 0.35 --width_px 0.15 --darken 0.85
 
 # orbit GIF: render | Dirac measure
@@ -121,13 +124,13 @@ python scripts/eval_strands.py --run runs/synth
 
 ## 📈 Results
 
-All runs train for 30k iterations with the same code and settings. *Points* are zero-length segments, i.e. a
-3DGS-MCMC-style baseline inside this code base (not the official 3DGS-MCMC). LPIPS uses VGG.
+All runs train for 30k iterations with this code. *Points* are zero-length segments, i.e. a 3DGS-MCMC-style baseline
+inside this code base (not the official 3DGS-MCMC). LPIPS uses VGG.
 
 ### Shelly
 
-<sub>6 scenes, 1920 px, white background, cap 500k primitives. The paper uses the Spherical Voronoi (SV8) appearance
-model; this implementation uses SH degree 3.</sub>
+<sub>6 scenes, 1920 px, white background, cap 500k primitives. These runs use SH degree 3 (`--appearance sh`);
+the paper uses SV8.</sub>
 
 | Method | Appearance | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
 |---|:-:|:-:|:-:|:-:|
@@ -160,22 +163,23 @@ model; this implementation uses SH degree 3.</sub>
 
 ### Mip-NeRF 360: bonsai
 
-<sub>images_2, every 8th view held out, cap 1M primitives</sub>
+<sub>Paper protocol: SV8 appearance, cap 1.5M primitives (the Spherical Voronoi budget for indoor scenes), images_2,
+every 8th view held out.</sub>
 
 | Method | PSNR ↑ | SSIM ↑ | LPIPS ↓ | mean polyline size |
 |---|:-:|:-:|:-:|:-:|
-| Points | **32.19** | 0.943 | 0.260 | 1.00 |
-| Ours, Gaussian kernel | 32.01 | 0.942 | 0.262 | 3.66 |
-| Ours, Beta kernel | 32.09 | **0.944** | 0.256 | 4.27 |
-| Ours, Gaussian kernel, long-segment setting ² | 31.98 | 0.943 | **0.253** | 1.40 |
+| Points | **33.94** | **0.951** | 0.245 | 1.00 |
+| **Ours, Gaussian kernel** | 33.77 | **0.951** | 0.245 | 4.12 |
+| Ours, Gaussian kernel, long-segment setting ² | 33.53 | 0.949 | **0.243** | 1.43 |
 
 <sub>² `--split_len_factor 10 --scale_reg 0.3 --init_seg_len 1.5`: fewer midpoint splits, a stronger scale regulariser
-and longer initial segments. Same model and recipe, only hyper-parameters differ.</sub>
+and longer initial segments. Same model and recipe, only hyper-parameters differ; it trades 0.2 dB for longer
+strokes.</sub>
 
 <p align="center"><img src="figures/bonsai_fig3.jpg" width="100%"></p>
 <p align="center"><sub>
-  Dirac measure (cf. paper Fig. 3), test view DSCF5589. <b>Left:</b> points are dots. <b>Middle:</b> our render.
-  <b>Right:</b> our segments form strokes along edges (bicycle, piano, walls). Long-segment setting.
+  Dirac measure (cf. paper Fig. 3), test view DSCF5589, SV8 runs from the table. <b>Left:</b> points are dots.
+  <b>Middle:</b> our render. <b>Right:</b> our segments form strokes along edges (bicycle, piano, walls).
 </sub></p>
 
 <p align="center"><img src="figures/bonsai_turntable.gif" width="85%"></p>
@@ -183,13 +187,13 @@ and longer initial segments. Same model and recipe, only hyper-parameters differ
 ### Synthetic strands
 
 <sub>`scripts/make_synthetic.py`: 48 thin coloured strands rendered with gsplat as an independent renderer;
-112 / 16 train / test views at 512², cap 100k.</sub>
+112 / 16 train / test views at 512², cap 100k, SV8.</sub>
 
 | Method | PSNR ↑ | LPIPS ↓ | strand F1 ↑ | 1-polyline cover ↑ | mean / max polyline size |
 |---|:-:|:-:|:-:|:-:|:-:|
-| Points | 43.46 | 0.0019 | 0.934 | 0.015 | 1 / 1 |
-| Ours, Gaussian | **49.47** | **0.00044** | **0.994** | 0.058 | 16.9 / 149 |
-| Ours, Beta | 49.06 | 0.00048 | 0.990 | **0.065** | 22.9 / 225 |
+| Points | 42.62 | 0.00204 | 0.964 | 0.013 | 1 / 1 |
+| Ours, Gaussian | 48.17 | 0.00057 | **0.995** | 0.060 | 18.3 / 151 |
+| Ours, Beta | **48.27** | **0.00056** | 0.992 | **0.065** | 23.0 / 235 |
 
 <p align="center"><img src="figures/synth_fig3.jpg" width="100%"></p>
 <p align="center"><sub><b>Left:</b> points draw each strand as a dotted line. <b>Middle:</b> our render.
@@ -200,11 +204,11 @@ and longer initial segments. Same model and recipe, only hyper-parameters differ
 
 | Setting | PSNR ↑ | strand F1 ↑ | 1-polyline cover ↑ | mean / max polyline size |
 |---|:-:|:-:|:-:|:-:|
-| w/o midpoint split | 49.03 | 0.927 | 0.027 | 4.96 / 41 |
-| w/o segment cloning | 49.07 | 0.984 | **0.089** | 30.5 / 305 |
-| w/o polyline merging | 49.33 | **0.995** | 0.015 | 1.35 / 10 |
-| w/o attraction loss | 49.43 | 0.991 | 0.029 | 4.38 / 43 |
-| **full** | **49.47** | 0.994 | 0.058 | 16.9 / 149 |
+| w/o midpoint split | 48.07 | 0.934 | 0.028 | 5.2 / 38 |
+| w/o segment cloning | 47.71 | 0.989 | **0.096** | 33.6 / 270 |
+| w/o polyline merging | 48.00 | **0.995** | 0.015 | 1.3 / 15 |
+| w/o attraction loss | 48.08 | 0.993 | 0.029 | 4.4 / 44 |
+| **full** | **48.17** | **0.995** | 0.060 | 18.3 / 151 |
 
 As in the paper, merging and attraction barely change PSNR but determine connectivity. Strand F1 follows Sec. 4.2
 (0.003 = 0.5 strand radius, 10°); 1-polyline cover is the fraction of a GT strand covered by the single predicted
@@ -239,13 +243,17 @@ cancellation for long, thin segments.
    is ≈ sigmoid(x) independent of its length, and splits and clones conserve Σρ_eff exactly.
 2. **MCMC noise.** The 3DGS-MCMC SGLD step applied to individual endpoints stretches segments into scene-sized streaks
    (a chain's shared vertex gets averaged noise, a free end the full kick). It is applied as a rigid translation of
-   isolated segments only. Near plane 0.2 as in 3DGS.
+   isolated segments only, scaled by min(1, (6 / scene extent)²) because the step is not unit-invariant (1 for
+   bonsai and the synthetic scene). Near plane 0.2 as in 3DGS; kernels whose screen radius exceeds two image sizes
+   (degenerate primitives just past the near plane) are skipped.
 3. **L_MCMC only on primitives that received a photometric gradient.** At initialisation most primitives are fully
    occluded; Adam then normalises the tiny regulariser into full-lr steps and ~97% of them die within 400 iterations.
    Primitives that contributed to no training view for one epoch are relocated as dead.
 4. **Merging and attraction.** Degree-1 endpoints of *different* polylines are merged (mutual nearest neighbours)
    within 0.5 kernel σ, only if the segments continue each other; the attraction loss pulls such endpoints within 3σ
-   (distance / σ). Both run after relocation stops (last 5k iterations).
+   (distance / σ). One merge pass never joins the same two polylines twice and only the closest pair between two
+   polylines attracts; otherwise a segment lying on an unseparated clone of itself collapses to zero length. Both
+   run after relocation stops (last 5k iterations).
 5. **Split pieces stay connected** (shared midpoint vertex), as in Fig. 6. Table 1 reports component size 1.00
    without merging, which suggests otherwise; the paper is ambiguous here.
 </details>
@@ -269,7 +277,7 @@ python tests/test_spaghetti.py && python tests/test_model.py
 
 ## ⚠️ Limitations
 
-- SH degree 3 instead of the paper's SV8 appearance model, so numbers are not directly comparable to the paper.
+- The Shelly numbers use SH degree 3, not the paper's SV8, so they are not directly comparable to the paper.
 - Only bonsai from Mip-NeRF 360 is evaluated. Fuzzy is not reproduced yet: with the current preprocessing the
   numbers are far below the paper's, which points to a data issue rather than the method.
 - The Beta kernel uses quadrature (the paper's closed form is in its supplementary material).

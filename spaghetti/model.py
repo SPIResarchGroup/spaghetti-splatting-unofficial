@@ -77,8 +77,31 @@ def rgb2sh(rgb):
     return (rgb - 0.5) / 0.28209479177387814
 
 
+# Spherical Voronoi appearance (Di Sario et al., CVPR 2026), as in their 3DGS-MCMC release: K sites per primitive,
+# colour(d) = relu(sum_k softmax_k(-tau_k * |s_k/|s_k| - d|) c_k + 0.5), tau_k = exp(t_k)
+SV_ATTRS = ["sv_sites", "sv_tau", "sv_colors"]
+SH_ATTRS = ["sh_dc", "sh_rest"]
+
+
+def fibonacci_sphere(k, device=None):
+    i = torch.arange(k, dtype=torch.float32, device=device) + 0.5
+    y = 1 - 2 * i / k
+    r = torch.sqrt((1 - y * y).clamp_min(0))
+    phi = math.pi * (3 - math.sqrt(5)) * i
+    return torch.stack([torch.cos(phi) * r, y, torch.sin(phi) * r], -1)
+
+
+def sv_color(sites, tau, colors, dirs):
+    """sites (N,K,3) unnormalised, tau (N,K) log-temperatures, colors (N,K,3), dirs (N,3) unit view directions."""
+    s = F.normalize(sites, dim=-1)
+    # |s - d| for unit vectors, written via the dot product (finite gradient at s = d)
+    dist = torch.sqrt((2 - 2 * (s * dirs[:, None, :]).sum(-1)).clamp_min(1e-12))
+    w = torch.softmax(-torch.exp(tau) * dist, dim=-1)
+    return F.relu((w[..., None] * colors).sum(1) + 0.5)
+
+
 class SpaghettiModel:
-    def __init__(self, sh_degree=3, kernel="gaussian", device="cuda"):
+    def __init__(self, sh_degree=3, kernel="gaussian", device="cuda", appearance="sh", sv_sites=8):
         self.sh_degree = sh_degree
         self.active_sh = 0
         self.kernel = kernel
@@ -91,6 +114,28 @@ class SpaghettiModel:
         self.last_contrib = None  # (Ns,) last iteration with a nonzero photometric gradient
         self.seg_attrs = list(SEG_ATTRS)  # per-segment parameters (subclasses may add more)
         self.extra_vert = []  # extra scalar per-vertex parameters (for subclasses)
+        self.appearance, self.sv_k = "sh", sv_sites
+        self._set_appearance(appearance, sv_sites)
+
+    @property
+    def color_attrs(self):
+        return SV_ATTRS if self.appearance == "sv" else SH_ATTRS
+
+    def _set_appearance(self, appearance, k=8):
+        """Swap the appearance parameters in seg_attrs ("sh": SH coefficients, "sv": Spherical Voronoi, k sites)."""
+        assert appearance in ("sh", "sv"), appearance
+        old = self.color_attrs
+        i = self.seg_attrs.index(old[0])
+        self.seg_attrs = [a for a in self.seg_attrs if a not in old]
+        self.appearance, self.sv_k = appearance, k
+        self.seg_attrs[i:i] = self.color_attrs
+
+    def view_colors(self, dirs):
+        """Per-segment RGB (>= 0, unclamped above) for unit view directions dirs (camera -> segment)."""
+        if self.appearance == "sv":
+            return sv_color(self.sv_sites, self.sv_tau, self.sv_colors, dirs)
+        sh = torch.cat([self.sh_dc, self.sh_rest], 1)
+        return torch.clamp_min(eval_sh(self.active_sh, sh, dirs) + 0.5, 0.0)
 
     # ------------------------------------------------------------------ init
     @torch.no_grad()
@@ -122,9 +167,17 @@ class SpaghettiModel:
         self.quats = q.requires_grad_(True)
         self.opacity = inverse_sigmoid(torch.full((N,), init_opacity, device=dev)).requires_grad_(True)
         rgb = torch.as_tensor(np.asarray(rgb, dtype=np.float32), device=dev)
-        self.sh_dc = rgb2sh(rgb)[:, None, :].contiguous().requires_grad_(True)
-        nrest = (self.sh_degree + 1) ** 2 - 1
-        self.sh_rest = torch.zeros(N, nrest, 3, device=dev).requires_grad_(True)
+        if self.appearance == "sv":
+            # SV release init: Fibonacci sites shared by all primitives, tau = exp(0) = 1, every site's colour =
+            # point colour - 0.5 (so the initial colour is the point colour in every direction)
+            K = self.sv_k
+            self.sv_sites = fibonacci_sphere(K, dev)[None].repeat(N, 1, 1).contiguous().requires_grad_(True)
+            self.sv_tau = torch.zeros(N, K, device=dev).requires_grad_(True)
+            self.sv_colors = (rgb.clamp(0, 1) - 0.5)[:, None, :].repeat(1, K, 1).contiguous().requires_grad_(True)
+        else:
+            self.sh_dc = rgb2sh(rgb)[:, None, :].contiguous().requires_grad_(True)
+            nrest = (self.sh_degree + 1) ** 2 - 1
+            self.sh_rest = torch.zeros(N, nrest, 3, device=dev).requires_grad_(True)
         self.beta = torch.zeros(N, device=dev).requires_grad_(True)
         self.last_contrib = torch.zeros(N, dtype=torch.long, device=dev)
 
@@ -181,12 +234,11 @@ class SpaghettiModel:
             rho = rho * comp3d
         if override_color is None:
             dirs = F.normalize(0.5 * (a + b).detach() - cam.center[None], dim=-1)
-            sh = torch.cat([self.sh_dc, self.sh_rest], 1)
-            color = torch.clamp_min(eval_sh(self.active_sh, sh, dirs) + 0.5, 0.0)
+            color = self.view_colors(dirs)
         else:
             color = override_color
         beta = self.get_beta() if self.kernel == "beta" else None
-        rad = screen_radii(pr, rho, self.kernel, beta=beta)
+        rad = screen_radii(pr, rho, self.kernel, beta=beta, max_radius=2.0 * max(cam.W, cam.H))
         rgb, alpha, info = rasterize(pr["pa"], pr["pb"], pr["ca"], pr["cb"], pr["Q"], rho, color, pr["depth"], rad,
                                      cam.W, cam.H, bg, kernel=self.kernel, beta=beta, alpha_min=alpha_min, T_min=T_min)
         info["visible"] = rad[:, 0] > 0
@@ -249,10 +301,11 @@ class SpaghettiModel:
 
     @torch.no_grad()
     def _gc_vertices(self, opt):
+        """Drop vertices no segment uses. Returns the old->new index map (-1 = dropped), or None if none dropped."""
         used = torch.zeros(self.num_vertices, dtype=torch.bool, device=self.device)
         used[self.segs.reshape(-1)] = True
         if bool(used.all()):
-            return
+            return None
         vsrc = used.nonzero().squeeze(1)
         remap = torch.full((self.num_vertices,), -1, dtype=torch.long, device=self.device)
         remap[vsrc] = torch.arange(vsrc.numel(), device=self.device)
@@ -261,6 +314,7 @@ class SpaghettiModel:
         ar = torch.arange(Ns, device=self.device)
         self._rebuild(opt, ar, torch.zeros(Ns, dtype=torch.bool, device=self.device), segs, None, vsrc,
                       self._vertex_features()[vsrc], torch.zeros(vsrc.numel(), dtype=torch.bool, device=self.device))
+        return remap
 
     # ------------------------------------------------------------- MCMC ops
     @torch.no_grad()
@@ -371,7 +425,7 @@ class SpaghettiModel:
             dead |= (self.iteration - self.last_contrib) > stale_iters
         # safety net: anything non-finite is dead (and is never used as a relocation target)
         vbad = ~torch.isfinite(self.verts.detach()).all(-1)
-        for name in ["log_scales", "quats", "sh_dc"]:
+        for name in ["log_scales", "quats"] + self.color_attrs:
             dead |= ~torch.isfinite(getattr(self, name).detach()).reshape(self.num_segments, -1).all(-1)
         dead |= vbad[self.segs[:, 0]] | vbad[self.segs[:, 1]]
         o = torch.where(dead, torch.zeros_like(o), o)
@@ -485,27 +539,76 @@ class SpaghettiModel:
         # polyline into a loop / contract it), (3) an end-to-end *continuation*: the two segments point away from
         # each other at the joint. (3) rejects a clone and its parent, which sit on top of each other with the
         # same orientation and would otherwise be fused into a pair of duplicate parallel edges.
+        # (1) first: it is cheap and leaves few pairs for the gathers of (2) and (3)
+        ok = d < factor * np.minimum(s[i], s[j])
+        i, j, d = i[ok], j[ok], d[ok]
         comp_lab, _ = self.components()
         lab = comp_lab[own.cpu().numpy()]
         V = self.verts.detach()
         dirv = (V[ends] - V[oth]).cpu().numpy()  # direction of the owning segment towards the endpoint
-        ok = (d < factor * np.minimum(s[i], s[j])) & (lab[i] != lab[j]) & ((dirv[i] * dirv[j]).sum(1) < 0)
+        # continuation angle: cos of the bend at the joint (1 = straight). merge_cos = 0 accepts any bend < 90 deg
+        nrm = np.linalg.norm(dirv, axis=1) + 1e-12
+        straight = -(dirv[i] * dirv[j]).sum(1) / (nrm[i] * nrm[j])
+        ok = (lab[i] != lab[j]) & (straight > getattr(self, "merge_cos", 0.0))
         i, j, d = i[ok], j[ok], d[ok]
         lo, hi = np.minimum(i, j), np.maximum(i, j)
         key = lo.astype(np.int64) * len(P) + hi
         _, first = np.unique(key, return_index=True)
         if len(first) == 0:
             return None
-        return ends.cpu().numpy(), lo[first], hi[first], d[first], s
+        return ends.cpu().numpy(), lo[first], hi[first], d[first], s, lab
 
-    @torch.no_grad()
-    def merge_endpoints(self, opt, factor=0.5):
-        """Merge pairs of polyline endpoints closer than factor * kernel scale (greedy, closest first)."""
-        cand = self._candidate_pairs(factor)
-        if cand is None:
-            return 0
-        ends, i, j, d, _ = cand
-        # mutual nearest neighbours among the candidates -> a matching (each endpoint merged at most once)
+    def _end_dist(self, ends, u, w):
+        V = self.verts.detach()
+        return (V[torch.as_tensor(ends[u], device=self.device)]
+                - V[torch.as_tensor(ends[w], device=self.device)]).norm(dim=-1).cpu().numpy()
+
+    @staticmethod
+    def _acyclic(lab, a, b, d):
+        """Filter a merge matching (a[k] ~ b[k], endpoints with component labels lab) so that the merges of one call
+        never join the same two components twice (Kruskal: closest first, union-find over labels).
+        Two merges between the same components close a cycle. The common case is a segment lying on top of a clone
+        of itself: each end's nearest *continuation* is the far end of the other copy (a~d, b~c), and merging both
+        puts all four vertices on the midpoint, i.e. both segments collapse to zero length. They then stay
+        degenerate (symmetric gradients), and relocation keeps cloning them (seen: 13% of the budget at
+        merge_factor 4). With one merge the pair becomes a straight two-segment polyline instead."""
+        if len(a) == 0:
+            return a, b
+        parent = {}
+
+        def find(x):
+            root = x
+            while parent.get(root, root) != root:
+                root = parent[root]
+            while parent.get(x, x) != root:
+                parent[x], x = root, parent[x]
+            return root
+
+        ok = np.zeros(len(a), dtype=bool)
+        for k in np.argsort(d, kind="stable"):
+            ra, rb = find(int(lab[a[k]])), find(int(lab[b[k]]))
+            if ra != rb:
+                parent[ra] = rb
+                ok[k] = True
+        return a[ok], b[ok]
+
+    @staticmethod
+    def _one_per_component_pair(lab, u, w, d):
+        """Keep only the closest attraction pair between any two components. Pulling a polyline towards another one
+        at two places folds it onto the other (for a segment on a clone of itself, a->d and b->c shrink both)."""
+        if len(u) == 0:
+            return u, w
+        la, lb = lab[u].astype(np.int64), lab[w].astype(np.int64)
+        key = np.minimum(la, lb) * (int(lab.max()) + 1) + np.maximum(la, lb)
+        order = np.lexsort((d, key))
+        first = np.ones(len(order), dtype=bool)
+        first[1:] = key[order][1:] != key[order][:-1]
+        sel = np.sort(order[first])
+        return u[sel], w[sel]
+
+    @staticmethod
+    def _nearest_partner(i, j, d):
+        """For candidate pairs (i, j, d): every endpoint that has a candidate, with its closest partner."""
         u = np.concatenate([i, j])
         w = np.concatenate([j, i])
         dd = np.concatenate([d, d])
@@ -513,13 +616,36 @@ class SpaghettiModel:
         u, w = u[order], w[order]
         first = np.ones(len(u), dtype=bool)
         first[1:] = u[1:] != u[:-1]
-        best = np.full(len(ends), -1)
-        best[u[first]] = w[first]
+        return u[first], w[first]
+
+    @staticmethod
+    def _mutual_matching(n, i, j, d):
+        """Mutual nearest neighbours among the candidates -> a matching (each endpoint used at most once)."""
+        u, w = SpaghettiModel._nearest_partner(i, j, d)
+        best = np.full(n, -1)
+        best[u] = w
         cand_u = np.nonzero(best >= 0)[0]
         mutual = cand_u[(best[best[cand_u]] == cand_u) & (cand_u < best[cand_u])]
-        if len(mutual) == 0:
+        return mutual, best[mutual]
+
+    @torch.no_grad()
+    def merge_endpoints(self, opt, factor=0.5):
+        """Merge pairs of polyline endpoints closer than factor * kernel scale (greedy, closest first)."""
+        cand = self._candidate_pairs(factor)
+        if cand is None:
             return 0
-        keep_i, drop_j = ends[mutual], ends[best[mutual]]
+        ends, i, j, d, _, lab = cand
+        a, b = self._mutual_matching(len(ends), i, j, d)
+        a, b = self._acyclic(lab, a, b, self._end_dist(ends, a, b))
+        if len(a) == 0:
+            return 0
+        self._merge_vertices(opt, ends[a], ends[b])
+        return len(a)
+
+    @torch.no_grad()
+    def _merge_vertices(self, opt, keep_i, drop_j):
+        """Identify vertex drop_j[k] with keep_i[k] (placed at their midpoint). Returns the old->new vertex index map
+        of the compaction (None if no vertex was removed)."""
         ki = torch.as_tensor(keep_i, device=self.device)
         dj = torch.as_tensor(drop_j, device=self.device)
         V = self._vertex_features().clone()
@@ -532,8 +658,7 @@ class SpaghettiModel:
         reset[ki] = True
         self._rebuild(opt, torch.arange(Ns, device=self.device), torch.zeros(Ns, dtype=torch.bool, device=self.device),
                       segs, None, torch.arange(Nv, device=self.device), V, reset)
-        self._gc_vertices(opt)
-        return len(keep_i)
+        return self._gc_vertices(opt)
 
     @torch.no_grad()
     def update_attraction_pairs(self, factor=3.0):
@@ -542,18 +667,12 @@ class SpaghettiModel:
         if cand is None:
             self.attract_pairs = None
             return 0
-        ends, i, j, d, s = cand
+        ends, i, j, d, s, lab = cand
         if len(i) == 0:
             self.attract_pairs = None
             return 0
-        u = np.concatenate([i, j])
-        w = np.concatenate([j, i])
-        dd = np.concatenate([d, d])
-        order = np.lexsort((dd, u))
-        u, w = u[order], w[order]
-        first = np.ones(len(u), dtype=bool)
-        first[1:] = u[1:] != u[:-1]
-        u, w = u[first], w[first]
+        u, w = self._nearest_partner(i, j, d)
+        u, w = self._one_per_component_pair(lab, u, w, self._end_dist(ends, u, w))
         sc = np.minimum(s[u], s[w])
         self.attract_pairs = (torch.as_tensor(ends[u], device=self.device), torch.as_tensor(ends[w], device=self.device),
                               torch.as_tensor(sc, device=self.device, dtype=torch.float32))
@@ -583,11 +702,13 @@ class SpaghettiModel:
     def state_dict(self):
         d = {k: v.detach().cpu() for k, v in self.params().items()}
         d.update(segs=self.segs.cpu(), kernel=self.kernel, sh_degree=self.sh_degree, active_sh=self.active_sh,
+                 appearance=self.appearance, sv_k=self.sv_k,
                  point_mode=self.point_mode, filter3d=None if self.filter3d is None else self.filter3d.cpu(),
                  last_contrib=None if self.last_contrib is None else self.last_contrib.cpu())
         return d
 
     def load_state_dict(self, d):
+        self._set_appearance(d.get("appearance", "sh"), d.get("sv_k", 8))
         for k in ["verts"] + self.extra_vert + self.seg_attrs:
             setattr(self, k, d[k].to(self.device).requires_grad_(True))
         self.segs = d["segs"].to(self.device)

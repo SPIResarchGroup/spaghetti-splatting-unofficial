@@ -22,7 +22,6 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spaghetti.data import load_colmap, load_synthetic  # noqa: E402
 from spaghetti.model import SpaghettiModel, inverse_sigmoid  # noqa: E402
-from spaghetti.render import eval_sh  # noqa: E402
 
 VIEWS = ["rgb", "strokes", "shrunk", "polylines", "primitives"]
 
@@ -43,8 +42,7 @@ def clone(m):
 def true_colors(m, cam):
     a, b = m.endpoints()
     dirs = F.normalize(0.5 * (a + b) - cam.center[None], dim=-1)
-    sh = torch.cat([m.sh_dc, m.sh_rest], 1)
-    return torch.clamp(eval_sh(m.active_sh, sh, dirs) + 0.5, 0, 1)
+    return m.view_colors(dirs).clamp(0, 1)
 
 
 def random_colors(labels, seed=0):

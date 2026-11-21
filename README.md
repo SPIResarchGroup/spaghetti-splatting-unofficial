@@ -9,6 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![PyTorch](https://img.shields.io/badge/PyTorch-%E2%89%A52.1-ee4c2c?logo=pytorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-JIT%20rasterizer-76b900?logo=nvidia&logoColor=white)
+[![arXiv](https://img.shields.io/badge/arXiv-Paper-b31b1b.svg)](https://arxiv.org/abs/2611.12716v1)
 
 <img src="figures/shelly_khady.gif" width="49%"> <img src="figures/shelly_kitten.gif" width="49%">
 

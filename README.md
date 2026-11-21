@@ -136,6 +136,10 @@ model; this implementation uses SH degree 3.</sub>
 | Points *(this repo)* | SH3 | 36.17 | 0.954 | 0.078 |
 | **Ours, Gaussian kernel *(this repo)*** | SH3 | 37.31 | 0.963 | 0.062 |
 
+<p align="center">
+  <img src="figures/shelly_fernvase.gif" width="49%"> <img src="figures/shelly_pug.gif" width="49%">
+</p>
+
 <p align="center"><img src="figures/shelly_results.jpg" width="100%"></p>
 
 <details>

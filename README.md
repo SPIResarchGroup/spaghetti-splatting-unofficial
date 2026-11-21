@@ -58,7 +58,7 @@ CUDA ≥ 12.8). The rasterizer is JIT-compiled on first import into `spaghetti/c
 PyTorch 2.11 and CUDA 12.8.
 
 ```bash
-git clone https://github.com/jjjeon99/spaghetti-splatting-unofficial.git
+git clone https://github.com/SPIResarchGroup/spaghetti-splatting-unofficial.git
 cd spaghetti-splatting-unofficial
 pip install -r requirements.txt          # install PyTorch for your platform first
 # optional: export CUDA_HOME=/path/to/cuda   (otherwise auto-detected from the python env or PATH)
@@ -300,4 +300,6 @@ Please cite the original paper:
 ## License
 
 The code in this repository is released under the MIT License (see `LICENSE`). Datasets keep their own licenses and
-are not redistributed.
+are not redistributed. The Shelly figures and GIFs in `figures/` are renders of models trained on the Shelly dataset
+and are shared under its license, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+(non-commercial, attribution to Wang et al., *Adaptive Shells*, and the original asset creators).

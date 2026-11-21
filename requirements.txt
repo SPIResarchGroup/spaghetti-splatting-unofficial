@@ -1,0 +1,10 @@
+# PyTorch with CUDA must be installed for your platform first (https://pytorch.org), plus a matching nvcc.
+torch>=2.1
+numpy
+scipy
+pillow
+torchmetrics   # LPIPS
+matplotlib     # kernel-size maps
+ninja          # JIT build of the CUDA extension
+# optional
+gsplat         # tests (projection parity) and synthetic ground truth (scripts/make_synthetic.py)

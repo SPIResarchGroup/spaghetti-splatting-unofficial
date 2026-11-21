@@ -1,0 +1,12 @@
+# data, outputs, builds
+data/
+runs/
+logs/
+results.md
+spaghetti/csrc/build/
+__pycache__/
+*.pyc
+*.pt
+*.pdf
+*.mp4
+*.gif

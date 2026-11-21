@@ -225,10 +225,7 @@ $`\Sigma(\lambda) = \big(z_m / z(\lambda)\big)^2\, \Sigma_m`$. With $`g_0 = (p -
 $`g_1 = (p - p_b)\, z_b / z_m`$ and $`Q = \tfrac{1}{2}\Sigma_m^{-1}`$, the Jacobian of the perspective
 re-parameterisation cancels exactly and
 
-```math
-\tau(p) = \rho \int_0^1 e^{-\lVert g_0 + \lambda (g_1 - g_0) \rVert_Q^2}\, d\lambda
-        = \rho\, e^{-E}\, \frac{\sqrt{\pi}}{2\kappa} \Big[\operatorname{erf}(A) + \operatorname{erf}(\kappa - A)\Big],
-```
+$`\displaystyle \tau(p) = \rho \int_0^1 e^{-\lVert g_0 + \lambda (g_1 - g_0) \rVert_Q^2}\, d\lambda = \rho\, e^{-E}\, \frac{\sqrt{\pi}}{2\kappa} \Big[ \operatorname{erf}(A) + \operatorname{erf}(\kappa - A) \Big]`$
 
 the same form as Eq. 19, with $`P = g_0^\top Q g_0`$, $`R = (g_1 - g_0)^\top Q g_0`$,
 $`K = \kappa^2 = \lVert g_1 - g_0 \rVert_Q^2`$, $`A = -R/\kappa`$ and $`E = P - A^2`$.

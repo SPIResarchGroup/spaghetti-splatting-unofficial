@@ -1,6 +1,7 @@
-"""Train Spaghetti Splatting (or the point baseline) on a COLMAP or synthetic scene.
+"""Train Spaghetti Splatting (or the point baseline) on a COLMAP, Blender-format (Shelly) or synthetic scene.
 
 python train.py --data data/360_v2/bonsai --images images_2 --out runs/bonsai_gauss --kernel gaussian
+python train.py --data data/shelly/kitten --type blender --cap 500000 --out runs/shelly_kitten
 python train.py --data data/synth_spaghetti --type synthetic --out runs/synth --kernel beta
 python train.py ... --points            # same pipeline with zero-length segments (3DGS-MCMC-like baseline)
 """
@@ -15,7 +16,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from spaghetti.data import load_colmap, load_synthetic, scene_extent
+from spaghetti.data import load_blender, load_colmap, load_synthetic, scene_extent
 from spaghetti.metrics import lpips, psnr, ssim
 from spaghetti.model import SpaghettiModel
 
@@ -28,7 +29,7 @@ def expon_lr(it, lr0, lr1, max_steps):
 def get_args(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
-    ap.add_argument("--type", choices=["colmap", "synthetic"], default="colmap")
+    ap.add_argument("--type", choices=["colmap", "synthetic", "blender"], default="colmap")
     ap.add_argument("--images", default="images_2")
     ap.add_argument("--out", required=True)
     ap.add_argument("--kernel", choices=["gaussian", "beta"], default="gaussian")
@@ -100,9 +101,13 @@ def main(argv=None):
     json.dump(vars(args), open(os.path.join(args.out, "args.json"), "w"), indent=2)
     dev = "cuda"
 
+    bg_arg = [float(x) for x in args.bg.split(",")] if args.bg else None
     if args.type == "colmap":
-        train_cams, test_cams, xyz, rgb = load_colmap(args.data, args.images, device=dev)
+        train_cams, test_cams, xyz, rgb = load_colmap(args.data, args.images, device=dev, bg=bg_arg)
         bg = [0.0, 0.0, 0.0]
+    elif args.type == "blender":  # NeRF-synthetic format, e.g. Shelly: RGBA composited on white
+        train_cams, test_cams, xyz, rgb = load_blender(args.data, device=dev, bg=bg_arg or (1.0, 1.0, 1.0))
+        bg = [1.0, 1.0, 1.0]
     else:
         train_cams, test_cams, xyz, rgb, meta = load_synthetic(args.data, device=dev)
         bg = meta.get("bg", [0.0, 0.0, 0.0])

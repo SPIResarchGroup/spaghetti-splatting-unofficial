@@ -221,16 +221,21 @@ polyline that matches most of it.
 <summary><b>Screen-space segment integral (own derivation of Sec. 3.4)</b></summary>
 
 Linearise EWA at the 3D midpoint of the segment and let the 2D covariance scale with inverse depth along it,
-Σ(λ) = (z_m / z(λ))² Σ_m. With g₀ = (p − p_a)·z_a/z_m, g₁ = (p − p_b)·z_b/z_m and Q = ½ Σ_m⁻¹, the Jacobian of the
-perspective re-parameterisation cancels exactly and
+$`\Sigma(\lambda) = \big(z_m / z(\lambda)\big)^2\, \Sigma_m`$. With $`g_0 = (p - p_a)\, z_a / z_m`$,
+$`g_1 = (p - p_b)\, z_b / z_m`$ and $`Q = \tfrac{1}{2}\Sigma_m^{-1}`$, the Jacobian of the perspective
+re-parameterisation cancels exactly and
 
-$$\tau(p) = \rho \int_0^1 e^{-\lVert g_0 + \lambda (g_1 - g_0) \rVert_Q^2}\, d\lambda
-= \rho\, e^{-E}\, \frac{\sqrt{\pi}}{2\kappa} \big[\operatorname{erf}(A) + \operatorname{erf}(\kappa - A)\big],$$
+```math
+\tau(p) = \rho \int_0^1 e^{-\lVert g_0 + \lambda (g_1 - g_0) \rVert_Q^2}\, d\lambda
+        = \rho\, e^{-E}\, \frac{\sqrt{\pi}}{2\kappa} \Big[\operatorname{erf}(A) + \operatorname{erf}(\kappa - A)\Big],
+```
 
-the same form as Eq. 19, with P = g₀ᵀQg₀, R = (g₁ − g₀)ᵀQg₀, K = κ² = ‖g₁ − g₀‖²_Q, A = −R/κ and E = P − A².
-λ is the 3D segment parameter (perspective-correct), a = b gives the 3DGS kernel exactly, and the error with respect to
-the exact 3D ray integral is ≤ 1.1% of the peak in the tests. E and q(1) are evaluated from vectors to avoid float32
-cancellation for long, thin segments.
+the same form as Eq. 19, with $`P = g_0^\top Q g_0`$, $`R = (g_1 - g_0)^\top Q g_0`$,
+$`K = \kappa^2 = \lVert g_1 - g_0 \rVert_Q^2`$, $`A = -R/\kappa`$ and $`E = P - A^2`$.
+
+- $`\lambda`$ is the 3D segment parameter (perspective-correct), and a = b gives the 3DGS kernel exactly.
+- The error with respect to the exact 3D ray integral is ≤ 1.1% of the peak in the tests.
+- $`E`$ and $`q(1)`$ are evaluated from vectors to avoid float32 cancellation for long, thin segments.
 </details>
 
 <details>
@@ -239,11 +244,12 @@ cancellation for long, thin segments.
 1. **Density per unit kernel length.** Eq. 6 gives every segment unit mass, which, trained naively, makes the
    optimiser shrink segments to points (the lateral optical depth decays as 1/length). Following the paper's
    *exact subdivision* argument (pieces inherit the density per unit length), the density is parameterised as
-   ρ_eff = softplus(x)·(1 + L/(√(2π) σ_along)). a = b still gives 3DGS exactly, the peak alpha across a long segment
-   is ≈ sigmoid(x) independent of its length, and splits and clones conserve Σρ_eff exactly.
+   $`\rho_\mathrm{eff} = \mathrm{softplus}(x)\,\big(1 + L / (\sqrt{2\pi}\,\sigma_\mathrm{along})\big)`$.
+   a = b still gives 3DGS exactly, the peak alpha across a long segment is ≈ sigmoid(x) independent of its length,
+   and splits and clones conserve $`\sum \rho_\mathrm{eff}`$ exactly.
 2. **MCMC noise.** The 3DGS-MCMC SGLD step applied to individual endpoints stretches segments into scene-sized streaks
    (a chain's shared vertex gets averaged noise, a free end the full kick). It is applied as a rigid translation of
-   isolated segments only, scaled by min(1, (6 / scene extent)²) because the step is not unit-invariant (1 for
+   isolated segments only, scaled by $`\min\big(1, (6 / \text{extent})^2\big)`$ because the step is not unit-invariant (1 for
    bonsai and the synthetic scene). Near plane 0.2 as in 3DGS; kernels whose screen radius exceeds two image sizes
    (degenerate primitives just past the near plane) are skipped.
 3. **L_MCMC only on primitives that received a photometric gradient.** At initialisation most primitives are fully
